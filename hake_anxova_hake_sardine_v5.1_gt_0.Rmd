@@ -1,0 +1,2220 @@
+---
+title: "Hake_anchovies & Hake_Sardines"
+author: "Xavi Barber & co."
+date: "Sys.Date()"
+output: pdf_document
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, 
+                      comment=" ", cache=FALSE )
+```
+
+
+```{r libraries}
+library(sp)
+library(rgeos)
+library(geoR)
+library(dismo)
+library(hSDM)
+library(rgdal)
+library(spdep)
+library(spData)
+library(fields)
+library(raster)
+library(maptools)
+library(gridExtra)
+library(ggplot2)
+library(rworldmap)
+library(rworldxtra)
+library(openxlsx)
+library(INLA)
+library(rgeos)
+library(GGally)
+library(ggplot2)
+library(ncdf4)
+library(corrplot)
+library(rasterVis)
+library( rnaturalearth)
+library(beepr)
+```
+
+# the dataset
+
+## Load data & maps
+
+```{r readData}
+setwd("~/GSA06")
+hake <- read.csv("Data/hake.csv", sep=";")
+sardina<-read.csv("Data/sardina.csv", sep=";")
+anxova<-read.csv("Data/anchoa.csv", sep=";")
+sardinella<-read.csv("Data/sardinella.csv", sep=";")
+
+# hake$ID<-paste(hake$lon, hake$lat, hake$year,sep="-")
+# sardina$ID<-cbind(hake$lon, hake$lat, hake$year, sep="-")
+# kk1<-merge(hake, sardina, by="ID")
+
+
+kk1<-merge(hake, sardina, by=c("year","lon", "lat"))
+colnames(kk1)<-c("year" , "lon", "lat", "haul.hake" ,      "abun.hake" , "Bio.hake"  ,  "haul.sardina"  ,     "abun.sardina" ,"Bio.sardina")
+kk1.2<-merge(kk1, anxova, by=c("year","lon", "lat"))
+colnames(kk1.2)<-c("year" , "lon", "lat", "haul.hake" ,      "abun.hake" , "Bio.hake"  ,  "haul.sardina"  ,     "abun.sardina" ,"Bio.sardina", "haul.anxova", "abun.anxova", "Bio.anxova")
+kk1.3<-merge(kk1.2, sardinella, by=c("year","lon", "lat"))
+colnames(kk1.3)<-c("year" , "lon", "lat", "haul.hake" ,      "abun.hake" , "Bio.hake"  ,  "haul.sardina"  ,     "abun.sardina" ,"Bio.sardina", "haul.anxova", "abun.anxova", "Bio.anxova", "haul.sardinella"  ,     "abun.sardinella" ,"Bio.sardinella")
+
+sel<-c(7,10, 13)
+data<-(kk1.3[, -sel])
+
+
+# names(kk1.3)
+# dim(kk1.3)
+# 
+# dim(hake)
+# head(kk1.3, 40)
+```
+
+
+
+```{r create_coast}
+#coordinates
+coords<-data[, c("lon","lat")]
+### --- Define the polygon --- ###
+### --- Spain --- ###
+spain <- getData('GADM',country="ESP",level=0)
+france<-getData('GADM',country="FRA",level=0)
+andorra<-getData('GADM',country="AND",level=0)
+
+europe_1<-gUnion(andorra,france)
+
+#europe0<-gUnion(spain, andorra)
+
+europe<-gUnion(europe_1, spain)
+
+
+
+#plot(europe)
+### --- Mediterraneo Español --- ### we crop our study area from the entire map
+
+#ext<-extent(-2,4,35,44) #medidas anteriores
+ext<-extent(-1,4.5,37.5,max(coords[,2]))
+cat <- crop(europe, ext) #Only mediterranean
+# plot(cat)
+
+
+### --- Define the polygon around the data --- ###
+#we defina a polygon as our study area 
+xym<- as.matrix(data.frame(
+      x =c(min(coords[,1])-0.1, min(coords[,1])+0.8,
+                max(coords[,1])+0.8, max(coords[,1])/8), 
+      y = c(37.5,42.5, max(coords[,2])+0.1, min(coords[,2])-0.1))) 
+
+xym<- as.matrix(data.frame(
+      x =c(min(coords[,1]), min(coords[,1]),
+                max(coords[,1]), max(coords[,1])/8), 
+      y = c(37.5,max(coords[,2]), max(coords[,2]), min(coords[,2])))) 
+
+
+p = Polygon(xym)
+ps = Polygons(list(p),1)
+sps = SpatialPolygons(list(ps))
+
+#Crop with mediterranean
+cat_rec<-crop(cat, sps)
+proj4string(sps)<-proj4string(cat_rec)
+crs(sps) #check if previous command has been applied
+
+
+### --- Select the polygon which contains the data --- ###
+coast <- gDifference(sps, cat_rec )
+
+
+pointsInside<-SpatialPointsDataFrame(coords = data[,c("lon","lat")], data = data,
+                                proj4string = CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"))
+
+#kk<-gIntersection(pointsInside, coast)
+
+data2<-data[!is.na(over(pointsInside, as(coast, "SpatialPolygons"))),]
+
+
+```
+
+## ploting dataset
+
+```{r beautiful_map , fig.width=10, fig.height=15}
+library("ggplot2")
+library("sf")
+library("rnaturalearth")
+library("rnaturalearthdata")
+library("ggspatial")
+
+theme_set(theme_bw())
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+data2$pres<-NA
+data2$pres<-ifelse(data2$abun.sardina==0 &
+                     data2$abun.hake==0 &
+                     data2$abun.anxova==0 &
+                     data2$abun.sardinella==0, 
+                     0,data2$pres)
+
+data2$pres<-ifelse(data2$abun.sardina>0 |
+                     data2$abun.hake>0 |
+                     data2$abun.anxova>0 |
+                     data2$abun.sardinella>0, 
+                     1,data2$pres)
+
+
+
+ggplot(data = world) +
+    geom_sf() +
+    annotation_scale(location = "br", width_hint = 0.5) +
+    annotation_north_arrow(location = "br", which_north = "true", 
+        pad_x = unit(0.75, "in"), pad_y = unit(0.5, "in"),
+        style = north_arrow_fancy_orienteering) +
+    coord_sf(xlim = c(ext@xmin, ext@xmax ), 
+             ylim = c(ext@ymin, ext@ymax))+
+  theme(panel.grid.major = element_line(color = gray(.5),
+                                        linetype = "dashed", size = 0.5), panel.background = element_rect(fill = "aliceblue"))+
+  xlab("Longitude") + ylab("Latitude") +
+  labs(col = "Hake-Anxovies")+
+  geom_point(data = data2, aes(x = lon, y = lat, color=pres))
+```
+
+### Building presence/ausence
+
+```{r presence_by_species}
+data2$anxova<-NA
+data2$anxova<-ifelse(data2$abun.anxova==0 & !is.na(data2$abun.anxov), 
+                     0,data2$anxova)
+
+data2$anxova<-ifelse(data2$abun.anxova>0 & !is.na(data2$abun.anxov), 
+                     1,data2$anxova)
+
+
+data2$sardina<-NA
+data2$sardina<-ifelse(data2$abun.sardina ==0 & !is.na(data2$abun.sardina), 
+                     0,data2$anxova)
+
+data2$sardina<-ifelse(data2$abun.sardina>0 & !is.na(data2$abun.sardina), 
+                     1,data2$sardina)
+
+data2$hake<-NA
+data2$hake<-ifelse(data2$abun.hake ==0 & !is.na(data2$abun.hake), 
+                     0,data2$anxova)
+
+data2$hake<-ifelse(data2$abun.hake>0 & !is.na(data2$abun.hake), 
+                     1,data2$hake)
+
+
+data2$sardinella<-ifelse(data2$abun.sardinella ==0 & !is.na(data2$abun.sardinella), 
+                     0,data2$anxova)
+
+data2$sardinella<-ifelse(data2$abun.sardinella>0 & !is.na(data2$abun.sardinella), 
+                     1,data2$sardinella)
+
+```
+
+### Predictors
+
+```{r predictors1}
+#######################################
+### --- Environmental variables --- ###
+#######################################
+#opción 1
+
+library(sdmpredictors)
+
+listado<- list_layers(c("MARSPEC"))$layer_code
+predictors<-load_layers(listado[1])
+names(predictors)<-"Bathymetry"
+
+
+predictors<-crop(predictors, ext)
+predictors2<-scale(predictors, scale=FALSE)
+#plot(predictors2)
+
+
+#opción 2
+# ## --- Upload environmental files
+# library(oceanmap)
+# 
+# #Bathy_data<-get.bathy(ext, visualize=F,main="Mediterranean Sea",res=4,levels=200) # 
+# #saveRDS(Bathy_data, file="Bathy_data.RDS")
+# Bathy_data<-readRDS("Bathy_data.RDS")
+# predictors<-stack (Bathy_data)
+# ### --- Standardize predictors --- ###
+# predictors2<-scale(predictors)
+# ### --- Crop predictors only for our subset
+# ext<-extent(-1,4.5,37,42.5)
+# predictors2<-crop(predictors2,ext)
+proj4string(predictors2)<-proj4string(cat_rec)
+
+#######################################################
+### --- Create the datasets with the predictors --- ###
+#######################################################
+data3<-NULL
+kk1<-as.matrix((data2[,2:3]), ncol=2)
+kk2<-raster::extract(predictors2, kk1)
+ data3<-cbind(data2,kk2) 
+```
+
+## The mesh (to improve)
+
+```{r meshCreator, results='hide', fig.width=11, fig.height=15}
+### --- Built the mesh --- ###
+#### create a domain of the study area using inla.nonconvex.hull()
+library(INLA)
+#boundary=inla.nonconvex.hull(as.matrix(data[,2:3])) #the boundaries of our mesh are the boundaries of our lat and long data
+
+
+max.edge = diff(range(data3$lon))/15
+# - some chosen constant
+# - results should not be sensitive to this (if you have a good mesh)
+# - max.edge = diff(range(df$locx))/15
+bound.outer = diff(range(data3$lon))/3
+# - the outer boundary I want to use for my mesh
+# - some chosen constant
+# - results should not be sensitive to this
+# - bound.outer = diff(range(df$locx))/3
+
+mesh_xavi = inla.mesh.2d(loc=kk1, boundary=coast,
+                    max.edge = c(1,5)*max.edge,
+# - use 5 times max.edge in the outer extension/offset/boundary
+                    cutoff = max.edge/5,
+                    offset = c(max.edge, bound.outer))
+
+plot(mesh_xavi, main="")
+plot(europe, add=T, col="gray")
+points(data3$lon, data3$lat, pch=20, col=(data3$pres+5))
+title("Contrained refined Delaunay triangulation (mesh) and sampling points")
+```
+
+
+# Anxovies Abundance  (univariate)
+
+## Inference 
+
+```{r anxovies-univariate-1}
+
+
+sele<-(data3$abun.hake>0 & data3$abun.hake<9999) &  (data3$abun.anxova>0  & data3$abun.anxova<53000)
+data2010<-data3[data3$year>=2000,]
+data2010<-data3[sele,]
+
+
+y2<-(data2010$abun.anxova) +0.001
+
+
+
+
+
+batimetria3<-scale(data2010$Bathymetry , scale=F) 
+batimetria2<-batimetria3
+
+
+
+spde_corre <- inla.spde2.pcmatern(mesh = mesh_xavi, 
+  prior.range = c(0.05, 0.025), # P(range < 0.05) = 0.01
+  prior.sigma = c(10, 0.025),
+  constr = T) # P(sigma > 1) = 0.01
+
+
+X<-data2010$lon
+Y<-data2010$lat
+
+loc2<-cbind(X,Y)
+
+
+## ----pcopy---------------------------------------------------------------
+hyper <- list(theta = list(prior = 'normal', param = c(0, 5)))
+#hyper1 = list(theta = list(prior="pc.prec", param=c(1,0.01)))
+
+## ----form----------------------------------------------------------------
+form <- y ~ 0 + intercept2 + 
+  batimetria2+
+  f(s2, model = spde_corre) 
+  
+
+#-------
+
+A <- inla.spde.make.A(mesh_xavi, loc2) 
+
+
+
+stack2 <- inla.stack(
+  data = list(y =  as.vector(y2), link=1),
+  A = list(A,1), 
+  effects = list(list(s2 = 1:spde_corre$n.spde,
+                      s12 = 1:spde_corre$n.spde),
+                  data.frame(intercept2 = 1, batimetria2=batimetria2)),
+  tag="est.anxova.uni")
+
+
+
+result_uni2000<- inla(form, 'gamma',
+                       data = inla.stack.data(stack2),
+                      control.family = list(link = "log"),
+                       #  control.family = list(hyper.eps, hyper.eps),
+                       # control.family=list(list(link="logit"),list(link="logit")),
+                       control.predictor = list(A = inla.stack.A(stack2),
+                                                compute = TRUE,link=1),
+                   #    control.mode = list(theta =result_corre2010$mode$theta, restart = TRUE),
+                      control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE,    config = TRUE),
+                       #   control.inla = list( int.strategy = 'eb') ,
+                       control.results = list(return.marginals.predictor = FALSE,
+                                              return.marginals.random = FALSE),
+                      control.inla = list(int.strategy = 'eb'),
+                       num.threads = 3,
+                       verbose=FALSE)
+
+
+saveRDS(result_uni2000, file="result_uni2000.RDS")
+result_uni2000<-readRDS(file="result_uni2000.RDS")
+
+#summary(result_corre2000)
+
+knitr::kable(result_uni2000$summary.fixed[,1:5],
+  row.names = TRUE,
+  caption = "Posterior distribution for Fixed Effects (Univariate 2000-2017).",
+   format = "pandoc")
+
+knitr::kable(result_uni2000$summary.hyperpar[,1:5], digits=3,
+  row.names = TRUE,
+  caption = "Posterior distributions of the parameters of the spatial fields (Univariate 2000-2017).",
+   format = "pandoc")
+```
+
+
+### Spatial effect
+
+```{r spatial_effect_uni_anchovie}
+####################################################
+### --- Interpolate the posterior mean and sd --- ##
+####################################################
+### --- plot in a grid m X m --- ##
+
+### --- Customize the grid to predict --- ###
+#now we are going to remove the part of the mesh that was inside the coast
+layout(1,1)
+#bbox(coast)
+dxy <- apply(bbox(coast),1, diff)
+r <- dxy[1]/dxy[2]
+m<-150
+proj.grid.mat <- 
+  inla.mesh.projector(mesh_xavi, 
+                      xlim=bbox(coast)[1,],
+                      ylim=bbox(coast)[2,] ,
+                      dims=c(r, 1)*m)
+
+
+### --- clean (set NA to the values outside boundary) --- ###
+ov <- over(SpatialPoints(proj.grid.mat$lattice$loc, coast@proj4string),
+           coast)
+
+### --- check grid points inside the map --- ###
+i.map <- is.na(ov)
+
+
+
+
+```
+
+
+## Prediction
+
+```{r prediction-univariate-anxovies-1}
+A2.pred <- inla.spde.make.A(mesh_xavi, loc=proj.grid.mat$lattice$loc[!i.map, ])
+
+
+bathy.pred<-raster::extract(predictors2$Bathymetry,  proj.grid.mat$lattice$loc[!i.map, ]) 
+
+bathy.pred<-scale(bathy.pred, scale=FALSE)
+
+
+nY<-table(!i.map)[2]
+
+
+
+stk.pred.2 <- inla.stack(data=list(y=matrix(NA, ncol=1, nrow=nY), link=2), 
+                         #  ,, 
+                         A=list(A2.pred,1), 
+                         effects = list(list(s2 = 1:spde_corre$n.spde,
+                                             s12 = 1:spde_corre$n.spde),
+                                        data.frame(intercept2=rep(1,nY), 
+                                                   batimetria2=bathy.pred)),
+                         tag='pred.y2.uni')
+
+
+
+
+stack_all.pred <- inla.stack( stack2,# stack3,  
+                        stk.pred.2)#, stk.pred.3) 
+
+pred_univariate_2000_2017<- inla(form, 'gamma',
+                       data = inla.stack.data(stack_all.pred),
+                       control.family = list(link = "log"),
+                       #  control.family = list(hyper.eps, hyper.eps),
+                       # control.family=list(list(link="logit"),list(link="logit")),
+                       control.predictor = list(A = inla.stack.A(stack_all.pred),
+                                                compute = TRUE,link=1),
+                       control.mode = list(theta =result_uni2000$mode$theta, restart = TRUE),
+                    #   control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE,    config = TRUE),
+                       #   control.inla = list( int.strategy = 'eb') ,
+                       control.results = list(return.marginals.predictor = FALSE,
+                                              return.marginals.random = FALSE),
+                      #control.inla = list(int.strategy = 'eb'),
+                       num.threads = 3,
+                       verbose=FALSE)
+# beep(0)
+# beep("fanfare")
+# beep(8)
+
+saveRDS(pred_univariate_2000_2017, file="pred_univariate_2000_2017.RDS")
+pred_univariate_2000_2017<-readRDS(file="pred_univariate_2000_2017.RDS")
+```
+
+### spatial effect
+
+```{r}
+
+idx.y2 <- inla.stack.index(stack_all.pred, 'pred.y2.uni')$data  
+
+
+
+spatial.effect  <- matrix(NA, proj.grid.mat$lattice$dims[1],proj.grid.mat$lattice$dims[2])
+spatial.effect[!i.map]<-pred_univariate_2000_2017$summary.linear.predictor[idx.y2 , "mean"]
+
+## plot spatial effect
+image.plot(proj.grid.mat$x, 
+           proj.grid.mat$y,
+          ( spatial.effect), 
+           axes=TRUE, xlab=("Longitude"), ylab="Latitude"  ,
+           col= tim.colors(100), horizontal = T) #, zlim=c(-15,15))#,
+          # breaks = breaks)
+plot(europe, add=TRUE,col="bisque4")
+title(" mean spatial effect Anxovies (univariate)")
+box()
+
+```
+
+### Prediction Plot Univariate Anchovies
+
+```{r plot_pred_uni}
+
+
+
+prob.mean.y2 <- prob.sd.y2 <- prob.0.025.y2<- prob.0.975.y2 <- matrix(NA, proj.grid.mat$lattice$dims[1],
+                                                          proj.grid.mat$lattice$dims[2])
+prob.mean.y2[!i.map] <- (c(pred_univariate_2000_2017$summary.fitted.val$mean[idx.y2]))
+prob.sd.y2[!i.map] <- c(pred_univariate_2000_2017$summary.fitted.val$sd[idx.y2])
+prob.0.025.y2[!i.map] <- c(pred_univariate_2000_2017$summary.fitted.val$`0.025quant`[idx.y2])
+prob.0.975.y2[!i.map] <- c(pred_univariate_2000_2017$summary.fitted.val$`0.975quant`[idx.y2])
+
+
+
+library(RColorBrewer)
+#par(mfrow=c(2,2))
+#par(mar=c(2,3,3,6))
+
+
+rf <- colorRampPalette(rev(brewer.pal(11,'Spectral')))   # make colors
+colores1 <-rf(10) #rf(length(breaks1)-1)
+
+
+
+
+maximo<- 15 #max(prob.mean.y2, na.rm=T)
+minimo<-(-15) #min(prob.mean.y2, na.rm=T)
+particion<-2#maximo/200
+breaks <- seq(minimo, maximo , particion)
+
+image.plot(proj.grid.mat$x, 
+           proj.grid.mat$y,
+          ( prob.mean.y2), 
+           axes=TRUE, xlab=("Longitude"), ylab="Latitude"  ,
+           col= tim.colors(100), horizontal = T) #, zlim=c(0, 2000000))#,
+          # breaks = breaks)
+plot(europe, add=TRUE,col="bisque4")
+title(" Anxovies (univariates)")
+box()
+
+
+
+# 
+# cat("\n\n\\pagebreak\n")
+# 
+# image.plot(proj.grid.mat$x, 
+#            proj.grid.mat$y,
+#            prob.0.025, axes=TRUE, xlab=("Longitude"), ylab="Latitude")#,
+#            # breaks=breaks1, lab.breaks=breaks1,
+#            # col=colores1)
+# plot(cat_rec, add=TRUE,col="gray")
+# title("Quantile 0.025 Fish (2010)")
+# box()
+# 
+# 
+# 
+# image.plot(proj.grid.mat$x, 
+#            proj.grid.mat$y,
+#            prob.0.975, axes=TRUE, xlab=("Longitude"), ylab="Latitude")#,
+#            # breaks=breaks1, lab.breaks=breaks1,
+#            # col=colores1)
+# plot(cat_rec, add=TRUE,col="gray")
+# title("Quantile 0.975 Fish (2010)")
+# box()
+
+```
+
+
+# Coregionalization Anchovies|Hake
+
+## Inference
+
+```{r corre-1-anchovies}
+# for (i in 1:length(unique(data3$year))){
+#   kk<-cor(data3[data3$year==(i+1993), c(5,7,9,11)])
+#   print(i+1993)
+#   print(kk)
+# 
+# }
+# 
+# for (i in 1:length(unique(data3$year))){
+#   kk<-cor(data3[data3$year==(i+1993), c(6,8,10,12)])
+#   print(i+1993)
+#   print(kk)
+# 
+# }
+
+#data2010<-data3[data3$year==2012,]
+
+sele<-(data3$abun.hake>0 & data3$abun.hake<9999) &  (data3$abun.anxova>0  & data3$abun.anxova<53000)
+data2010<-data3[data3$year>=2000,]
+data2010<-data3[sele,]
+
+
+# y3<-log1p(data2010$Bio.hake)#+0.001
+# y2<-log1p(data2010$Bio.anxova)#+0.001
+# y1<-log1p(data2010$Bio.sardina)#+0.001
+# 
+# 
+# y3<-(data2010$Bio.hake)+0.001
+# y2<-(data2010$Bio.anxova)+0.001
+# y1<-(data2010$Bio.sardina)+0.001
+
+  
+y1<-(data2010$abun.hake)+0.001 #data2010$hake)
+y2<-(data2010$abun.anxova) +0.001
+#y3<-(data2010$abun.sardina) +0.001
+
+
+# y3<-(data2010$Bio.hake+0.01)
+# # summary(y3)
+# # library(MASS)
+# # fitdistr(y3,"gamma")
+# #   hist(y3)  
+#   
+# y2<-(data2010$Bio.anxova+0.01)
+#  # hist(y2) 
+#  # summary(y2)
+# y1<-(data2010$Bio.sardina+0.01)
+ # hist(y1) 
+ # summary(y1)
+
+
+# library(DescTools)
+# #hist(LogSt(y3))
+# #hist(LogStInv(LogSt(y3)))
+# #g(x)=log_10(x), if x>c, log_10(c) - (c-x)/(c log(10)), otherwise
+# 
+# #Yeo-Johnson Power Transformations
+# # Yeo, In-Kwon and Johnson, Richard (2000). A new family of power transformations
+# # to improve normality or symmetry. Biometrika, 87, 954-959.
+# library(VGAM)
+# y3<-yeo.johnson(data2010$abun.hake, 0.11)
+# hist(y3)
+# y2<-yeo.johnson(data2010$abun.anxova, 0.13)
+# hist(y2)
+# 
+# library(caret)
+# y3<-preProcess(data2010$abun.hake,method="YeoJohnson" )
+# 
+# 
+# y3<-LogSt(y3)
+# y2<-data2010$abun.anxova #(data2010$anxova)
+# y2<-transforma(y2, )
+# hist(y2)
+# y1<-data2010$abun.sardina#(data2010$sardina)
+# y1<-LogSt(y1)
+
+
+batimetria3<-scale(data2010$Bathymetry , scale=F) 
+batimetria2<-batimetria3
+batimetria1<-batimetria3
+
+
+spde_corre <- inla.spde2.pcmatern(mesh = mesh_xavi, 
+  prior.range = c(0.05, 0.025), # P(range < 0.05) = 0.01
+  prior.sigma = c(10, 0.025),
+  constr = T) # P(sigma > 1) = 0.01
+
+
+X<-data2010$lon
+Y<-data2010$lat
+loc3<-cbind(X,Y)
+loc2<-cbind(X,Y)
+loc1<-cbind(X,Y)
+
+## ----pcopy---------------------------------------------------------------
+hyper <- list(theta = list(prior = 'normal', param = c(0, 5)))
+#hyper1 = list(theta = list(prior="pc.prec", param=c(1,0.01)))
+
+## ----form----------------------------------------------------------------
+form <- y ~ 0 + intercept1 + intercept2 + #intercept3 + 
+  batimetria1+batimetria2+ #batimetria3+
+  f(s1, model = spde_corre) + f(s2, model = spde_corre) + 
+#  f(s3, model = spde_corre) + 
+  f(s12, copy = "s1", fixed = FALSE, hyper = hyper) 
+#  f(s13, copy = "s1", fixed = FALSE, hyper = hyper) + 
+#  f(s23, copy = "s2", fixed = FALSE, hyper = hyper) #+
+ # f(plate, model="iid", hyper=hyper1)
+  
+
+#-------
+
+#A3 <- inla.spde.make.A(mesh_xavi, loc3) 
+#A2 <- inla.spde.make.A(mesh_xavi, loc1) 
+
+A <- inla.spde.make.A(mesh_xavi, loc1) 
+
+
+# stack3 <- inla.stack(
+#   data = list(y = cbind(NA, NA,as.vector(y3)), link=3),
+#   A = list(A3,1), 
+#   effects = list(list(s3 = 1:spde_corre$n.spde,
+#                        s13 = 1:spde_corre$n.spde,
+#                         s23 = 1:spde_corre$n.spde),
+#                    #    list( plate=1:nrow(data2010)),
+#                   data.frame(intercept3 = 1, batimetria3=batimetria3)),
+#   tag="est.sarina.corre")
+
+stack2 <- inla.stack(
+  data = list(y = cbind(NA, as.vector(y2)), link=1),
+  A = list(A,1), 
+  effects = list(list(s2 = 1:spde_corre$n.spde,
+                      s12 = 1:spde_corre$n.spde),
+                  data.frame(intercept2 = 1, batimetria2=batimetria2)),
+  tag="est.anxova.corre")
+
+stack1 <- inla.stack(
+  data = list(y = cbind(as.vector(y1), NA), link=1),
+  A = list(A,1), 
+  effects = list(list(s1 = 1:spde_corre$n.spde),
+                  data.frame(intercept1 = 1, batimetria1=batimetria1)),
+  tag="est.hake.corre")
+
+
+stack <- inla.stack(stack1, stack2) 
+
+#----result, results = 'hide'--------------------------------------------
+
+# result_corre2010<- inla(form, c(rep('gamma', 3)),
+#   data = inla.stack.data(stack),
+# #  control.family = list(hyper.eps, hyper.eps),
+#   control.predictor = list(A = inla.stack.A(stack)),
+#  # control.mode = list(theta = theta.ini, restart = TRUE),
+#   control.inla = list(int.strategy = 'eb'))
+
+result_corre2000<- inla(form, c(rep('gamma', 2)),
+                       data = inla.stack.data(stack),
+                       control.family = list(list(link = "log"),
+                                             list(link = "log")),
+                       #  control.family = list(hyper.eps, hyper.eps),
+                       # control.family=list(list(link="logit"),list(link="logit")),
+                       control.predictor = list(A = inla.stack.A(stack),
+                                                compute = TRUE,link=1),
+                   #    control.mode = list(theta =result_corre2010$mode$theta, restart = TRUE),
+                      control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE,    config = TRUE),
+                       #   control.inla = list( int.strategy = 'eb') ,
+                       control.results = list(return.marginals.predictor = FALSE,
+                                              return.marginals.random = FALSE),
+                      control.inla = list(int.strategy = 'eb'),
+                       num.threads = 3,
+                       verbose=FALSE)
+#result_corre2000<-inla.rerun(result_corre2000)
+
+# beep(0)
+# beep("fanfare")
+# beep(8)
+
+saveRDS(result_corre2000, file="result_corre2000.RDS")
+result_corre2000<-readRDS(file="result_corre2000.RDS")
+
+#summary(result_corre2000)
+
+knitr::kable(result_corre2000$summary.fixed[,1:5],
+  row.names = TRUE,
+  caption = "Posterior distribution for Fixed Effects (Coregionalization 2000-2017).",
+   format = "pandoc")
+
+knitr::kable(result_corre2000$summary.hyperpar[,1:5], digits=3,
+  row.names = TRUE,
+  caption = "Posterior distributions of the parameters of the spatial fields (Coregionalization 2000-2017).",
+   format = "pandoc")
+```
+
+
+```{r spatial_effect_corre-anchovies}
+####################################################
+### --- Interpolate the posterior mean and sd --- ##
+####################################################
+### --- plot in a grid m X m --- ##
+
+### --- Customize the grid to predict --- ###
+#now we are going to remove the part of the mesh that was inside the coast
+layout(1,1)
+#bbox(coast)
+dxy <- apply(bbox(coast),1, diff)
+r <- dxy[1]/dxy[2]
+m<-150
+proj.grid.mat <- 
+  inla.mesh.projector(mesh_xavi, 
+                      xlim=bbox(coast)[1,],
+                      ylim=bbox(coast)[2,] ,
+                      dims=c(r, 1)*m)
+
+
+### --- clean (set NA to the values outside boundary) --- ###
+ov <- over(SpatialPoints(proj.grid.mat$lattice$loc, coast@proj4string),
+           coast)
+
+### --- check grid points inside the map --- ###
+i.map <- is.na(ov)
+
+
+```
+
+
+
+## Prediction
+
+
+```{r corre-pred-anchovies}
+A1.pred <- inla.spde.make.A(mesh_xavi, loc=proj.grid.mat$lattice$loc[!i.map, ])
+A2.pred <- inla.spde.make.A(mesh_xavi, loc=proj.grid.mat$lattice$loc[!i.map, ])
+#A3.pred <- inla.spde.make.A(mesh_xavi, loc=proj.grid.mat$lattice$loc[!i.map, ])
+
+
+bathy.pred<-raster::extract(predictors2$Bathymetry,  proj.grid.mat$lattice$loc[!i.map, ]) 
+
+bathy.pred<-scale(bathy.pred, scale=FALSE)
+
+
+nY<-table(!i.map)[2]
+
+stk.pred.1 <- inla.stack(data=list(y=matrix(NA, ncol=2, nrow=nY), link=1), 
+                         A=list(A1.pred,1), 
+                         effects = list(list(s1 = 1:spde_corre$n.spde),
+                                        data.frame(intercept1=rep(1,nY), batimetria2=bathy.pred)),
+                         tag='pred.y1.corre')
+
+stk.pred.2 <- inla.stack(data=list(y=matrix(NA, ncol=2, nrow=nY), link=2), 
+                         #  ,, 
+                         A=list(A2.pred,1), 
+                         effects = list(list(s2 = 1:spde_corre$n.spde,
+                                             s12 = 1:spde_corre$n.spde),
+                                        data.frame(intercept2=rep(1,nY), batimetria2=bathy.pred)),
+                         tag='pred.y2.corre')
+
+# stk.pred.3 <- inla.stack(data=list(y=matrix(NA, ncol=3, nrow=nY), link=3), 
+#                          #  ,, 
+#                          A=list(A2.pred,1), 
+#                          effects = list(list(s3 = 1:spde_corre$n.spde,
+#                                              s13 = 1:spde_corre$n.spde,
+#                                              s23 = 1:spde_corre$n.spde),
+#                                         data.frame(intercept3=rep(1,nY), batimetria3=bathy.pred)),
+#                          tag='pred.y3')
+
+
+stack_all <- inla.stack(stack1, stack2,# stack3,  
+                        stk.pred.1, stk.pred.2)#, stk.pred.3) 
+
+pred_corre_2012_2017<- inla(form, c(rep('gamma', 2)),
+                       data = inla.stack.data(stack_all),
+                        control.family = list(list(link = "log"),
+                                             list(link = "log")),
+                       #  control.family = list(hyper.eps, hyper.eps),
+                       # control.family=list(list(link="logit"),list(link="logit")),
+                       control.predictor = list(A = inla.stack.A(stack_all),
+                                                compute = TRUE,link=1),
+                       control.mode = list(theta =result_corre2000$mode$theta, restart = TRUE),
+                    #   control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE,    config = TRUE),
+                       #   control.inla = list( int.strategy = 'eb') ,
+                       control.results = list(return.marginals.predictor = FALSE,
+                                              return.marginals.random = FALSE),
+                     # control.inla = list(int.strategy = 'eb'),
+                       num.threads = 3,
+                       verbose=FALSE)
+# beep(0)
+# beep("fanfare")
+# beep(8)
+
+saveRDS(pred_corre_2012_2017, file="pred_corre_2012_2017.RDS")
+pred_corre_2012_2017<-readRDS(file="pred_corre_2012_2017.RDS")
+
+```
+
+
+### spatial effect
+
+```{r}
+
+idx.y2 <- inla.stack.index(stack_all, 'pred.y2.corre')$data  
+
+
+
+spatial.effect.corre  <- matrix(NA, proj.grid.mat$lattice$dims[1],proj.grid.mat$lattice$dims[2])
+spatial.effect.corre[!i.map]<-pred_corre_2012_2017$summary.linear.predictor[idx.y2 , "mean"]
+
+## plot spatial effect
+image.plot(proj.grid.mat$x, 
+           proj.grid.mat$y,
+          ( spatial.effect.corre), 
+           axes=TRUE, xlab=("Longitude"), ylab="Latitude"  ,
+           col= tim.colors(100), horizontal = T) #, zlim=c(-15,15))#,
+          # breaks = breaks)
+plot(europe, add=TRUE,col="bisque4")
+title(" mean spatial effect Anxovies (coregionalized)")
+box()
+
+hist((spatial.effect.corre-mean(spatial.effect.corre, na.rm=TRUE))-(spatial.effect-mean(spatial.effect, na.rm=TRUE)),main="Diferencia del efecto espacial estandarizado", xlab="")
+```
+
+### Searching Spatial effect differences
+
+```{r}
+
+idx.y2 <- inla.stack.index(stack_all, 'pred.y2.corre')$data  
+
+
+
+diff.spatial.effect  <- matrix(NA, proj.grid.mat$lattice$dims[1],proj.grid.mat$lattice$dims[2])
+diff.spatial.effect <-spatial.effect.corre-spatial.effect
+
+## plot spatial effect
+image.plot(proj.grid.mat$x, 
+           proj.grid.mat$y,
+          ( diff.spatial.effect), 
+           axes=TRUE, xlab=("Longitude"), ylab="Latitude"  ,
+           col= tim.colors(100), horizontal = T) #, zlim=c(-15,15))#,
+          # breaks = breaks)
+plot(europe, add=TRUE,col="bisque4")
+title(" mean spatial effect differences Anxovies (coreg-uni)")
+box()
+
+```
+
+
+### Prediction Plot
+```{r plot_pred_corre}
+#idx <- inla.stack.index(stack_all, 'pred.y3')$data  
+idx.y2 <- inla.stack.index(stack_all, 'pred.y2.corre')$data  
+idx.y1 <- inla.stack.index(stack_all, 'pred.y1.corre')$data  
+
+### --- Organize probabilities into a matrix to visualize --- ###  
+
+# prob.mean <- prob.sd <- prob.0.025<- prob.0.975 <- matrix(NA, proj.grid.mat$lattice$dims[1],
+#                                                           proj.grid.mat$lattice$dims[2])
+# prob.mean[!i.map] <- c(pred_corre_2012_2017$summary.fitted.val$mean[idx])
+# prob.sd[!i.map] <- c(pred_corre_2012_2017$summary.fitted.val$sd[idx])
+# prob.0.025[!i.map] <- c(pred_corre_2012_2017$summary.fitted.val$`0.025quant`[idx])
+# prob.0.975[!i.map] <- c(pred_corre_2012_2017$summary.fitted.val$`0.975quant`[idx])
+
+
+
+prob.mean.y2 <- prob.sd.y2 <- prob.0.025.y2<- prob.0.975.y2 <- matrix(NA, proj.grid.mat$lattice$dims[1],
+                                                          proj.grid.mat$lattice$dims[2])
+prob.mean.y2[!i.map] <- (c(pred_corre_2012_2017$summary.fitted.val$mean[idx.y2]))
+prob.sd.y2[!i.map] <- c(pred_corre_2012_2017$summary.fitted.val$sd[idx.y2])
+prob.0.025.y2[!i.map] <- c(pred_corre_2012_2017$summary.fitted.val$`0.025quant`[idx.y2])
+prob.0.975.y2[!i.map] <- c(pred_corre_2012_2017$summary.fitted.val$`0.975quant`[idx.y2])
+
+
+prob.mean.y1 <- prob.sd.y1 <- prob.0.025.y1<- prob.0.975.y1 <- matrix(NA, proj.grid.mat$lattice$dims[1],
+                                                          proj.grid.mat$lattice$dims[2])
+prob.mean.y1[!i.map] <- (c(pred_corre_2012_2017$summary.fitted.val$mean[idx.y1]))
+prob.sd.y1[!i.map] <- c(pred_corre_2012_2017$summary.fitted.val$sd[idx.y1])
+prob.0.025.y1[!i.map] <- c(pred_corre_2012_2017$summary.fitted.val$`0.025quant`[idx.y1])
+prob.0.975.y1[!i.map] <- c(pred_corre_2012_2017$summary.fitted.val$`0.975quant`[idx.y1])
+
+
+
+library(RColorBrewer)
+#par(mfrow=c(2,2))
+#par(mar=c(2,3,3,6))
+
+#pdf("kk.pdf")
+### --- posterior predictive mean --- ###
+#breaks1<-c(seq(0,1, 0.1))
+#colores1=gray(seq(0, 1, length.out=length(breaks)-1))
+#colores1<-c("#FF0000", "#FF4D00","#FF7000", "#FF8A00", "#FF7000")
+rf <- colorRampPalette(rev(brewer.pal(11,'Spectral')))   # make colors
+colores1 <- rf(10) #rf(length(breaks1)-1)
+
+# maximo<- max(prob.mean, na.rm=T)
+# minimo<-0
+# particion<-maximo/2000
+# 
+# image.plot(proj.grid.mat$x, 
+#            proj.grid.mat$y,
+#           ( prob.mean), 
+#            axes=TRUE, xlab=("Longitude"), ylab="Latitude"  ,
+#            col=tim.colors(2000), horizontal = T,
+#            breaks = seq(minimo, maximo , particion))
+# plot(europe, add=TRUE,col="bisque4")
+# title("Hake | sard. & anch. (corregionalisation)")
+# box()
+
+
+maximo<- 15 #max(prob.mean.y2, na.rm=T)
+minimo<-(-15) #min(prob.mean.y2, na.rm=T)
+particion<-maximo/2000
+
+image.plot(proj.grid.mat$x, 
+           proj.grid.mat$y,
+          ( prob.mean.y2), 
+           axes=TRUE, xlab=("Longitude"), ylab="Latitude"  ,
+           col=tim.colors(2000), horizontal = T)#, zlim=c(-15,15))#,
+         #  breaks = seq(minimo, maximo , particion))
+plot(europe, add=TRUE,col="bisque4")
+title(" anx | hake (corregionalisation)")
+box()
+
+
+maximo<- max(prob.mean.y1, na.rm=T)
+minimo<-min(prob.mean.y1, na.rm=T)
+particion<-maximo/2000
+
+image.plot(proj.grid.mat$x, 
+           proj.grid.mat$y,
+          ( prob.mean.y1), 
+           axes=TRUE, xlab=("Longitude"), ylab="Latitude"  ,
+           col=tim.colors(2000), horizontal = T)#,
+        #   breaks = seq(minimo, maximo , particion))
+plot(europe, add=TRUE,col="bisque4")
+title(" Hake (corregionalisation)")
+box()
+
+
+# image.plot(proj.grid.mat$x, 
+#            proj.grid.mat$y,
+#            prob.mean.y2, 
+#            axes=TRUE, xlab=("Longitude"), ylab="Latitude")#,
+#      #      breaks=breaks1, lab.breaks=breaks1,
+#       #     col=colores1)
+# plot(cat_rec, add=TRUE,col="gray")
+# title("Fish Abundance/Km2 (2008)")
+# box()
+# 
+# # cat("\n\n\\pagebreak\n")
+# 
+# ### --- posterior predictive sd --- ###
+# min12<-0 #min(prob.sd, na.rm=TRUE)
+# max12<- 0.3 #max(prob.sd, na.rm=TRUE)
+# 
+# breaks2<-round(c(seq(min12,max12, (max12-min12)/10)),2)
+# 
+# 
+# #colores1=gray(seq(0, 1, length.out=length(breaks)-1))
+# #colores1<-c("#FF0000", "#FF4D00","#FF7000", "#FF8A00", "#FF7000")
+# rf <- colorRampPalette(rev(brewer.pal(11,'Spectral')))   # make colors
+# colores2 <- rf(length(breaks2)-1)
+# 
+# #cat(range(prob.sd, na.rm=TRUE))
+# 
+# image.plot(proj.grid.mat$x, 
+#            proj.grid.mat$y,
+#            prob.sd, axes=TRUE, xlab=("Longitude"), ylab="Latitude")#,
+#            #            breaks=breaks2, lab.breaks=breaks2,
+#            # col=colores2)
+# plot(cat_rec, add=TRUE,col="gray")
+# title("SD fish (coregionalisation)")
+# box()
+# 
+# cat("\n\n\\pagebreak\n")
+# 
+# image.plot(proj.grid.mat$x, 
+#            proj.grid.mat$y,
+#            prob.0.025, axes=TRUE, xlab=("Longitude"), ylab="Latitude")#,
+#            # breaks=breaks1, lab.breaks=breaks1,
+#            # col=colores1)
+# plot(cat_rec, add=TRUE,col="gray")
+# title("Quantile 0.025 Fish (2010)")
+# box()
+# 
+# 
+# 
+# image.plot(proj.grid.mat$x, 
+#            proj.grid.mat$y,
+#            prob.0.975, axes=TRUE, xlab=("Longitude"), ylab="Latitude")#,
+#            # breaks=breaks1, lab.breaks=breaks1,
+#            # col=colores1)
+# plot(cat_rec, add=TRUE,col="gray")
+# title("Quantile 0.975 Fish (2010)")
+# box()
+
+```
+
+# Spatio-temporal Anchovies|Hake
+
+$$y_1(s,t)=\beta_0^1+ \beta_1^1 \times Bathy + z_1(s,t)+ e_1(s,t)$$
+$$y_2(s,t)= \beta_0^2+ \beta_1^2 \times Bathy + \alpha_{2|1} y_1(s,t) + z_2(s,t)+ e_2(s,t)$$
+
+## From 1995 since 2017 
+
+```{r inference-st-1-anchovies, eval=TRUE}
+# spde_st1 <- inla.spde2.pcmatern(mesh = mesh_xavi, 
+#   prior.range = c(0.05, 0.01), # P(range < 0.05) = 0.01
+#   prior.sigma = c(1, 0.01)) # P(sigma > 1) = 0.01
+
+# sele<-data3$year==1995 |  data3$year==2000 | data3$year==2005 |  data3$year==20010 |  data3$year==2015 
+# sele<-data3$year==1999 |  data3$year==2000 | data3$year==2010 |  data3$year==20015 |   data3$year==2016 |  data3$year==2017
+# 
+# 
+# sele<-data3$year==1995 |  data3$year==2000 | data3$year==2005 |  data3$year==20010 |   data3$year==2015 |  data3$year==2017
+
+# 
+
+sele<-(data3$abun.hake>0 & data3$abun.hake<9999) &  (data3$abun.anxova>0  & data3$abun.anxova<53000)
+
+#data2010<-data3[data3$year>=2000,]
+data2010<-data3[sele,]
+
+y1<-data3$hake[sele ]
+y2<-data3$anxova[sele ]
+
+y1<-data3$abun.hake[sele ]+0.001
+y2<-data3$abun.anxova[sele ]+0.001
+
+range2006= result_corre2000$summary.hyperpar[3,3]
+stdev2006=result_corre2000$summary.hyperpar[4,5]
+
+spde_st1  <- inla.spde2.pcmatern(mesh = mesh_xavi, 
+                                  prior.range = c(0.05, 0.025), # P(range < range0) = 0.025
+                                  prior.sigma = c(10, 0.025),
+                                 constr = T) # P(sigma > sigma0) = 0.025
+
+
+
+# Indices for the space-time fields and for the copies need to be defined as well. As the same mesh is considered in all effects, these indices are the same for all the effects:
+
+#years
+k<-length(unique(data3$year[sele ]))
+
+s1 <- rep(1:spde_st1$n.spde, times = k)
+s2 <- s1
+s12 <- s1
+#s13 <- s1
+#s23 <- s1
+
+
+g1 <-   rep(1:k, each = spde_st1$n.spde)
+g2 <- g1
+g3<-g1
+g12 <- g1
+#g13 <- g1
+#g23<- g1
+
+# The prior on  rho_j   is chosen as a Penalized Complexity prior (Simpson et al. 2017) as well:
+
+rho1p <- list(theta = list(prior = 'pccor1', param = c(0.3, 0.9))) 
+ctr.g <- list(model = 'ar1', hyper = rho1p)
+
+# The prior above is chosen to consider  P(rho_j>0)=0.9
+#Priors for each of the copy parameters are Gaussian with zero mean and precision 10:
+
+hc1 <- list(theta = list(prior = 'normal', param = c(0, 10)))
+
+# The formula, which includes all the terms in the model and the priors previously defined, is:
+
+form <- y ~ -1 + intercept1 + intercept2 + # intercept3+ 
+  + batimetria1+ batimetria2+ #batimetria3+
+  f(s1, model = spde_st1, group = g1, control.group = ctr.g) + 
+  f(s2, model = spde_st1, group = g2, control.group = ctr.g) + 
+  f(s12, copy = "s1", group = g12, fixed = FALSE, hyper = hc1) #+
+
+
+X<-data3$lon[sele ]
+Y<-data3$lat[sele ]
+#loc3<-cbind(X,Y)
+loc2<-cbind(X,Y)
+loc1<-cbind(X,Y)
+
+
+ x1<-x2<-x3<-scale(data3$Bathymetry, scale=F)
+ x1<-x2<-scale(data3$Bathymetry[sele ], scale=F)
+# # 
+ loc<-as.matrix(cbind(data3[sele,2:3]))## different sampling points, and this is a problem!!
+ 
+
+# #  #create groups i groups.n 
+index<-as.vector(table(data3$year[sele]))
+
+ groups.years<-matrix(NA, ncol=1)
+ group.n.years<-matrix(NA, ncol=1)
+jj<-0
+for (i in 1:k){
+  jj<-jj+1
+  kk<-matrix(rep(i,  index[i]), ncol=1)
+  groups.years<-rbind(groups.years,kk)
+  group.n.years<-rbind(group.n.years, matrix( 1:index[i],ncol=1))
+}
+groups.years<-as.vector(groups.years[-1,])
+group.n.years<-as.vector(group.n.years[-1,])
+
+#stloc<-kronecker(matrix(1,k,1), loc)
+
+## create a A matrix with groups  x year.
+A <- inla.spde.make.A(mesh_xavi, loc,
+                      n.group = k,
+                      group =groups.years)
+# 
+# # 
+# # # INDEX juve/adult
+mesh.index.hake<- inla.spde.make.index("i.hake",
+                                      n.spde=spde_st1$n.spde,
+                                      n.group=k)
+
+
+
+mesh.index.anxova<- inla.spde.make.index("i.anxova",
+                                      n.spde=spde_st1$n.spde,
+                                      n.group=k)
+
+
+#Then data are organized in three data stacks, which are joined:
+
+####### include Bathy
+
+stack1 <- inla.stack(
+  data = list(y = cbind(y1, NA)),
+  A = list(A,1), 
+  effects = list(list(s1 = s1, g1 = g1),list(data.frame(intercept1= 1,batimetria1=x1))),
+  tag='est.st.y1') 
+
+
+stack2 <- inla.stack(
+  data = list(y = cbind(NA, y2)),
+  A = list(A,1), 
+  effects = list(list( s2 = s2, g2 = g2, 
+    s12 = s12, g12 = g12),list(data.frame(intercept2 = 1, batimetria2=x2))), tag='est.st.y2') 
+
+
+stack <- inla.stack(stack1, stack2)#, stack3) 
+
+#estimate_corre_st_1<-readRDS( "estimate_corre_st_1.RDS")
+
+#moda = list(theta =estimate_corre_st_1$mode$theta, restart = TRUE)
+
+# estimate_corre_st_1 <- inla(form, rep('lognormal', 2),
+#                             data = inla.stack.data(stack),
+#                      #  control.mode = moda,
+#                       control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE,    config = TRUE),
+#                        control.results = list(return.marginals.predictor = FALSE,
+#                                               return.marginals.random = FALSE),
+#                     # control.mode = list(theta = theta.ini, restart = TRUE),
+#                      control.inla = list(int.strategy = 'eb'),
+#                  control.predictor = list(A = inla.stack.A(stack), 
+#                                           compute = TRUE,link=1),
+#                     num.threads =4)
+# 
+# saveRDS(estimate_corre_st_1, file="estimate_corre_st_1.RDS")
+estimate_corre_st_1<-readRDS( "estimate_corre_st_1.RDS")
+
+
+#summary(estimate_corre_st_1)
+
+
+knitr::kable(estimate_corre_st_1$summary.fixed[,1:5],
+  row.names = TRUE,
+  caption = "Posterior distribution for Fixed Effects (spatio-temporal Anchovies Coregionalization 2000-2017).",
+   format = "pandoc")
+
+knitr::kable(estimate_corre_st_1$summary.hyperpar[,1:5], digits=3,
+  row.names = TRUE,
+  caption = "Posterior distributions of the parameters of the spatio-temporal fields (spatio-temporal Anchovies Coregionalization 2000-2017).",
+   format = "pandoc")
+
+
+```
+
+## Five by five: (1995,2000, 2005, 2010, 2015, 2017)
+
+```{r st-5-en-5, eval=FALSE}
+sele<-data3$year==1995 |  data3$year==2000 | data3$year==2005 |  data3$year==20010 |   data3$year==2015 |  data3$year==2017
+
+#sele<-data3$year>=1995 & data3$year<=2017
+
+y1<-data3$hake[sele ]
+y2<-data3$anxova[sele ]
+
+y1<-data3$abun.hake[sele ]+0.001
+y2<-data3$abun.anxova[sele ]+0.001
+
+range2006= result_corre2000$summary.hyperpar[3,3]
+stdev2006=result_corre2000$summary.hyperpar[4,5]
+
+spde_st1  <- inla.spde2.pcmatern(mesh = mesh_xavi, 
+                                  prior.range = c(range2006, 0.025), # P(range < range0) = 0.025
+                                  prior.sigma = c(stdev2006, 0.025),
+                                 constr = T) # P(sigma > sigma0) = 0.025
+
+
+
+# Indices for the space-time fields and for the copies need to be defined as well. As the same mesh is considered in all effects, these indices are the same for all the effects:
+
+#years
+k<-length(unique(data3$year[sele ]))
+
+s1 <- rep(1:spde_st1$n.spde, times = k)
+s2 <- s1
+s12 <- s1
+#s13 <- s1
+#s23 <- s1
+
+
+g1 <-   rep(1:k, each = spde_st1$n.spde)
+g2 <- g1
+g3<-g1
+g12 <- g1
+#g13 <- g1
+#g23<- g1
+
+# The prior on  rho_j   is chosen as a Penalized Complexity prior (Simpson et al. 2017) as well:
+
+rho1p <- list(theta = list(prior = 'pccor1', param = c(0.3, 0.9))) 
+ctr.g <- list(model = 'ar1', hyper = rho1p)
+
+# The prior above is chosen to consider  P(rho_j>0)=0.9
+#Priors for each of the copy parameters are Gaussian with zero mean and precision 10:
+
+hc1 <- list(theta = list(prior = 'normal', param = c(0, 10)))
+
+# The formula, which includes all the terms in the model and the priors previously defined, is:
+
+form <- y ~ -1 + intercept1 + intercept2 + # intercept3+ 
+  + batimetria1+ batimetria2+ #batimetria3+
+  f(s1, model = spde_st1, group = g1, control.group = ctr.g) + 
+  f(s2, model = spde_st1, group = g2, control.group = ctr.g) + 
+  f(s12, copy = "s1", group = g12, fixed = FALSE, hyper = hc1) #+
+
+
+X<-data3$lon[sele ]
+Y<-data3$lat[sele ]
+#loc3<-cbind(X,Y)
+loc2<-cbind(X,Y)
+loc1<-cbind(X,Y)
+
+
+ x1<-x2<-x3<-scale(data3$Bathymetry, scale=F)
+ x1<-x2<-scale(data3$Bathymetry[sele ], scale=F)
+# # 
+ loc<-as.matrix(cbind(data3[sele,2:3]))## different sampling points, and this is a problem!!
+ 
+
+# #  #create groups i groups.n 
+index<-as.vector(table(data3$year[sele]))
+
+ groups.years<-matrix(NA, ncol=1)
+ group.n.years<-matrix(NA, ncol=1)
+jj<-0
+for (i in 1:k){
+  jj<-jj+1
+  kk<-matrix(rep(i,  index[i]), ncol=1)
+  groups.years<-rbind(groups.years,kk)
+  group.n.years<-rbind(group.n.years, matrix( 1:index[i],ncol=1))
+}
+groups.years<-as.vector(groups.years[-1,])
+group.n.years<-as.vector(group.n.years[-1,])
+
+#stloc<-kronecker(matrix(1,k,1), loc)
+
+## create a A matrix with groups  x year.
+A <- inla.spde.make.A(mesh_xavi, loc,
+                      n.group = k,
+                      group =groups.years)
+# 
+# # 
+# # # INDEX juve/adult
+mesh.index.hake<- inla.spde.make.index("i.hake",
+                                      n.spde=spde_st1$n.spde,
+                                      n.group=k)
+
+
+
+mesh.index.anxova<- inla.spde.make.index("i.anxova",
+                                      n.spde=spde_st1$n.spde,
+                                      n.group=k)
+
+
+#Then data are organized in three data stacks, which are joined:
+
+####### include Bathy
+
+stack1 <- inla.stack(
+  data = list(y = cbind(y1, NA)),
+  A = list(A,1), 
+  effects = list(list(s1 = s1, g1 = g1),list(data.frame(intercept1= 1,batimetria1=x1))),
+  tag='est.st.y1') 
+
+
+stack2 <- inla.stack(
+  data = list(y = cbind(NA, y2)),
+  A = list(A,1), 
+  effects = list(list( s2 = s2, g2 = g2, 
+    s12 = s12, g12 = g12),list(data.frame(intercept2 = 1, batimetria2=x2))), tag='est.st.y2') 
+
+
+stack <- inla.stack(stack1, stack2)#, stack3) 
+
+#estimate_corre_st_1<-readRDS( "estimate_corre_st_1.RDS")
+
+#moda = list(theta =estimate_corre_st_1$mode$theta, restart = TRUE)
+
+# estimate_corre_st_5_en_5 <- inla(form, rep('lognormal', 2),
+#                             data = inla.stack.data(stack),
+#                      #  control.mode = moda,
+#                       control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE,    config = TRUE),
+#                        control.results = list(return.marginals.predictor = FALSE,
+#                                               return.marginals.random = FALSE),
+#                     # control.mode = list(theta = theta.ini, restart = TRUE),
+#                      control.inla = list(int.strategy = 'eb'),
+#                  control.predictor = list(A = inla.stack.A(stack), 
+#                                           compute = TRUE,link=1),
+#                     num.threads =4)
+# 
+# saveRDS(estimate_corre_st_5_en_5, file="estimate_corre_st_5_en_5.RDS")
+estimate_corre_st_5_en_5<-readRDS( "estimate_corre_st_5_en_5.RDS")
+
+
+#summary(estimate_corre_st_1)
+
+
+knitr::kable(estimate_corre_st_5_en_5$summary.fixed[,1:5],
+  row.names = TRUE,
+  caption = "Posterior distribution for Fixed Effects (spatio-temporal Anchovies Coregionalization 2000-2017).",
+   format = "pandoc")
+
+knitr::kable(estimate_corre_st_5_en_5$summary.hyperpar[,1:5], digits=3,
+  row.names = TRUE,
+  caption = "Posterior distributions of the parameters of the spatio-temporal fields (spatio-temporal Anchovies Coregionalization 2000-2017).",
+   format = "pandoc")
+
+```
+
+
+# Sardines Abundance  (univariate)
+
+## Inference 
+
+```{r sardines-univariate-1}
+
+
+sele<-(data3$abun.hake>0 & data3$abun.hake<9999) &  (data3$abun.sardina >0  & data3$abun.sardina<11200)
+data2010<-data3[data3$year>=2000,]
+data2010<-data3[sele,]
+
+
+y2<-(data2010$abun.sardina) +0.001
+
+batimetria3<-scale(data2010$Bathymetry , scale=F) 
+batimetria2<-batimetria3
+
+
+spde_corre <- inla.spde2.pcmatern(mesh = mesh_xavi, 
+                                  prior.range = c(0.15, 0.025), # P(range < 0.05) = 0.01
+                                  prior.sigma = c(1.15, 0.025),
+                                  constr = T) # P(sigma > 1) = 0.01
+
+X<-data2010$lon
+Y<-data2010$lat
+
+loc2<-cbind(X,Y)
+
+
+## ----pcopy---------------------------------------------------------------
+hyper <- list(theta = list(prior = 'normal', param = c(0, 5)))
+#hyper1 = list(theta = list(prior="pc.prec", param=c(1,0.01)))
+
+## ----form----------------------------------------------------------------
+form <- y ~ 0 + intercept2 + 
+  batimetria2+
+  f(s2, model = spde_corre) 
+
+
+#-------
+
+A <- inla.spde.make.A(mesh_xavi, loc2) 
+
+stack2 <- inla.stack(
+  data = list(y =  as.vector(y2), link=1),
+  A = list(A,1), 
+  effects = list(list(s2 = 1:spde_corre$n.spde,
+                      s12 = 1:spde_corre$n.spde),
+                 data.frame(intercept2 = 1, batimetria2=batimetria2)),
+  tag="est.sardine.uni")
+
+
+
+result_uni2000_sardine<- inla(form, 'gamma',
+                      data = inla.stack.data(stack2),
+                      control.family = list(link="log"),
+                      #  control.family = list(hyper.eps, hyper.eps),
+                      # control.family=list(list(link="logit"),list(link="logit")),
+                      control.predictor = list(A = inla.stack.A(stack2),
+                                               compute = TRUE,link=1),
+                      #    control.mode = list(theta =result_corre2010$mode$theta, restart = TRUE),
+                      control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE,    config = TRUE),
+                      #   control.inla = list( int.strategy = 'eb') ,
+                      control.results = list(return.marginals.predictor = FALSE,
+                                             return.marginals.random = FALSE),
+                      #   control.inla = list(int.strategy = 'eb'),
+                      num.threads = 3,
+                      verbose=FALSE)
+
+
+saveRDS(result_uni2000_sardine, file="result_uni2000_sardine.RDS")
+result_uni2000_sardine<-readRDS(file="result_uni2000_sardine.RDS")
+
+#summary(result_corre2000)
+
+knitr::kable(result_uni2000_sardine$summary.fixed[,1:5],
+             row.names = TRUE,
+             caption = "Posterior distribution for Fixed Effects (Univariate 2000-2017).",
+             format = "pandoc")
+
+knitr::kable(result_uni2000_sardine$summary.hyperpar[,1:5], digits=3,
+             row.names = TRUE,
+             caption = "Posterior distributions of the parameters of the spatial fields (Univariate 2000-2017).",
+             format = "pandoc")
+```
+
+
+### Spatial effect
+
+```{r spatial_effect_uni_sardi}
+####################################################
+### --- Interpolate the posterior mean and sd --- ##
+####################################################
+### --- plot in a grid m X m --- ##
+
+### --- Customize the grid to predict --- ###
+#now we are going to remove the part of the mesh that was inside the coast
+layout(1,1)
+#bbox(coast)
+dxy <- apply(bbox(coast),1, diff)
+r <- dxy[1]/dxy[2]
+m<-150
+proj.grid.mat <- 
+  inla.mesh.projector(mesh_xavi, 
+                      xlim=bbox(coast)[1,],
+                      ylim=bbox(coast)[2,] ,
+                      dims=c(r, 1)*m)
+
+
+### --- clean (set NA to the values outside boundary) --- ###
+ov <- over(SpatialPoints(proj.grid.mat$lattice$loc, coast@proj4string),
+           coast)
+
+### --- check grid points inside the map --- ###
+i.map <- is.na(ov)
+
+
+
+
+```
+
+
+## Prediction
+
+```{r prediction-univariate-sardines-1}
+A2.pred <- inla.spde.make.A(mesh_xavi, loc=proj.grid.mat$lattice$loc[!i.map, ])
+
+
+bathy.pred<-raster::extract(predictors2$Bathymetry,  proj.grid.mat$lattice$loc[!i.map, ]) 
+
+bathy.pred<-scale(bathy.pred, scale=FALSE)
+
+
+nY<-table(!i.map)[2]
+
+
+
+stk.pred.2 <- inla.stack(data=list(y=matrix(NA, ncol=1, nrow=nY), link=2), 
+                         #  ,, 
+                         A=list(A2.pred,1), 
+                         effects = list(list(s2 = 1:spde_corre$n.spde,
+                                             s12 = 1:spde_corre$n.spde),
+                                        data.frame(intercept2=rep(1,nY), batimetria2=bathy.pred)),
+                         tag='pred.y2.uni')
+
+
+
+
+stack_all.pred <- inla.stack( stack2,# stack3,  
+                              stk.pred.2)#, stk.pred.3) 
+
+pred_univariate_2000_2017_sardine<- inla(form, 'gamma',
+                                 data = inla.stack.data(stack_all.pred),
+                                 control.family = list(link="log"),
+                                 #  control.family = list(hyper.eps, hyper.eps),
+                                 # control.family=list(list(link="logit"),list(link="logit")),
+                                 control.predictor = list(A = inla.stack.A(stack_all.pred),
+                                                          compute = TRUE,link=1),
+                                 control.mode = list(theta =result_uni2000_sardine$mode$theta, restart = TRUE),
+                                 #   control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE,    config = TRUE),
+                                 #   control.inla = list( int.strategy = 'eb') ,
+                                 control.results = list(return.marginals.predictor = FALSE,
+                                                        return.marginals.random = FALSE),
+                                 #control.inla = list(int.strategy = 'eb'),
+                                 num.threads = 3,
+                                 verbose=FALSE)
+# beep(0)
+# beep("fanfare")
+# beep(8)
+
+saveRDS(pred_univariate_2000_2017_sardine, file="pred_univariate_2000_2017_sardine.RDS")
+pred_univariate_2000_2017_sardine<-readRDS(file="pred_univariate_2000_2017_sardine.RDS")
+```
+
+### spatial effect
+
+```{r}
+
+idx.y2 <- inla.stack.index(stack_all.pred, 'pred.y2.uni')$data  
+
+
+
+spatial.effect_sardine  <- matrix(NA, proj.grid.mat$lattice$dims[1],proj.grid.mat$lattice$dims[2])
+spatial.effect_sardine[!i.map]<-pred_univariate_2000_2017_sardine$summary.linear.predictor[idx.y2 , "mean"]
+
+## plot spatial effect
+image.plot(proj.grid.mat$x, 
+           proj.grid.mat$y,
+           ( spatial.effect_sardine), 
+           axes=TRUE, xlab=("Longitude"), ylab="Latitude"  ,
+           col= tim.colors(100), horizontal = T) #, zlim=c(-15,15))#,
+# breaks = breaks)
+plot(europe, add=TRUE,col="bisque4")
+title("mean spatial effect Sardines (univariate)")
+box()
+
+```
+
+
+
+### Prediction Plot Univariate Anchovies
+
+```{r plot_pred_uni_sardi}
+
+
+
+prob.mean.y2 <- prob.sd.y2 <- prob.0.025.y2<- prob.0.975.y2 <- matrix(NA, proj.grid.mat$lattice$dims[1],
+                                                                      proj.grid.mat$lattice$dims[2])
+prob.mean.y2[!i.map] <- (c(pred_univariate_2000_2017_sardine$summary.fitted.val$mean[idx.y2]))
+prob.sd.y2[!i.map] <- c(pred_univariate_2000_2017_sardine$summary.fitted.val$sd[idx.y2])
+prob.0.025.y2[!i.map] <- c(pred_univariate_2000_2017_sardine$summary.fitted.val$`0.025quant`[idx.y2])
+prob.0.975.y2[!i.map] <- c(pred_univariate_2000_2017_sardine$summary.fitted.val$`0.975quant`[idx.y2])
+
+
+
+library(RColorBrewer)
+#par(mfrow=c(2,2))
+#par(mar=c(2,3,3,6))
+
+
+rf <- colorRampPalette(rev(brewer.pal(11,'Spectral')))   # make colors
+colores1 <-rf(10) #rf(length(breaks1)-1)
+
+
+
+
+maximo<- 15 #max(prob.mean.y2, na.rm=T)
+minimo<-(-15) #min(prob.mean.y2, na.rm=T)
+particion<-2#maximo/200
+breaks <- seq(minimo, maximo , particion)
+
+image.plot(proj.grid.mat$x, 
+           proj.grid.mat$y,
+           ( prob.mean.y2), 
+           axes=TRUE, xlab=("Longitude"), ylab="Latitude"  ,
+           col= tim.colors(100), horizontal = T) #, zlim=c(0, 2000000))#,
+# breaks = breaks)
+plot(europe, add=TRUE,col="bisque4")
+title("Sardines (univariates)")
+box()
+
+
+
+# 
+# cat("\n\n\\pagebreak\n")
+# 
+# image.plot(proj.grid.mat$x, 
+#            proj.grid.mat$y,
+#            prob.0.025, axes=TRUE, xlab=("Longitude"), ylab="Latitude")#,
+#            # breaks=breaks1, lab.breaks=breaks1,
+#            # col=colores1)
+# plot(cat_rec, add=TRUE,col="gray")
+# title("Quantile 0.025 Fish (2010)")
+# box()
+# 
+# 
+# 
+# image.plot(proj.grid.mat$x, 
+#            proj.grid.mat$y,
+#            prob.0.975, axes=TRUE, xlab=("Longitude"), ylab="Latitude")#,
+#            # breaks=breaks1, lab.breaks=breaks1,
+#            # col=colores1)
+# plot(cat_rec, add=TRUE,col="gray")
+# title("Quantile 0.975 Fish (2010)")
+# box()
+
+```
+
+
+# Coregionalization Sardines | Hake
+
+## Inference
+
+```{r corre-1-sardines}
+# for (i in 1:length(unique(data3$year))){
+#   kk<-cor(data3[data3$year==(i+1993), c(5,7,9,11)])
+#   print(i+1993)
+#   print(kk)
+# 
+# }
+# 
+# for (i in 1:length(unique(data3$year))){
+#   kk<-cor(data3[data3$year==(i+1993), c(6,8,10,12)])
+#   print(i+1993)
+#   print(kk)
+# 
+# }
+
+#data2010<-data3[data3$year==2012,]
+
+sele<-(data3$abun.hake>0 & data3$abun.hake<9999) &  (data3$abun.sardina >0  & data3$abun.sardina<11200)
+data2010<-data3[data3$year>=2000,]
+data2010<-data3[sele,]
+
+
+# y3<-log1p(data2010$Bio.hake)#+0.001
+# y2<-log1p(data2010$Bio.anxova)#+0.001
+# y1<-log1p(data2010$Bio.sardina)#+0.001
+# 
+# 
+# y3<-(data2010$Bio.hake)+0.001
+# y2<-(data2010$Bio.anxova)+0.001
+# y1<-(data2010$Bio.sardina)+0.001
+
+  
+y1<-(data2010$abun.hake)+0.001 #data2010$hake)
+y2<-(data2010$abun.sardina) +0.001
+#y3<-(data2010$abun.sardina) +0.001
+
+
+# y3<-(data2010$Bio.hake+0.01)
+# # summary(y3)
+# # library(MASS)
+# # fitdistr(y3,"gamma")
+# #   hist(y3)  
+#   
+# y2<-(data2010$Bio.anxova+0.01)
+#  # hist(y2) 
+#  # summary(y2)
+# y1<-(data2010$Bio.sardina+0.01)
+ # hist(y1) 
+ # summary(y1)
+
+
+# library(DescTools)
+# #hist(LogSt(y3))
+# #hist(LogStInv(LogSt(y3)))
+# #g(x)=log_10(x), if x>c, log_10(c) - (c-x)/(c log(10)), otherwise
+# 
+# #Yeo-Johnson Power Transformations
+# # Yeo, In-Kwon and Johnson, Richard (2000). A new family of power transformations
+# # to improve normality or symmetry. Biometrika, 87, 954-959.
+# library(VGAM)
+# y3<-yeo.johnson(data2010$abun.hake, 0.11)
+# hist(y3)
+# y2<-yeo.johnson(data2010$abun.anxova, 0.13)
+# hist(y2)
+# 
+# library(caret)
+# y3<-preProcess(data2010$abun.hake,method="YeoJohnson" )
+# 
+# 
+# y3<-LogSt(y3)
+# y2<-data2010$abun.anxova #(data2010$anxova)
+# y2<-transforma(y2, )
+# hist(y2)
+# y1<-data2010$abun.sardina#(data2010$sardina)
+# y1<-LogSt(y1)
+
+
+batimetria3<-scale(data2010$Bathymetry , scale=F) 
+batimetria2<-batimetria3
+batimetria1<-batimetria3
+
+
+spde_corre <- inla.spde2.pcmatern(mesh = mesh_xavi, 
+  prior.range = c(0.05, 0.025), # P(range < 0.05) = 0.01
+  prior.sigma = c(10, 0.025),
+  constr = T) # P(sigma > 1) = 0.01
+
+
+X<-data2010$lon
+Y<-data2010$lat
+loc3<-cbind(X,Y)
+loc2<-cbind(X,Y)
+loc1<-cbind(X,Y)
+
+## ----pcopy---------------------------------------------------------------
+hyper <- list(theta = list(prior = 'normal', param = c(0, 5)))
+#hyper1 = list(theta = list(prior="pc.prec", param=c(1,0.01)))
+
+## ----form----------------------------------------------------------------
+form <- y ~ 0 + intercept1 + intercept2 + #intercept3 + 
+  batimetria1+batimetria2+ #batimetria3+
+  f(s1, model = spde_corre) + f(s2, model = spde_corre) + 
+#  f(s3, model = spde_corre) + 
+  f(s12, copy = "s1", fixed = FALSE, hyper = hyper) 
+#  f(s13, copy = "s1", fixed = FALSE, hyper = hyper) + 
+#  f(s23, copy = "s2", fixed = FALSE, hyper = hyper) #+
+ # f(plate, model="iid", hyper=hyper1)
+  
+
+#-------
+
+#A3 <- inla.spde.make.A(mesh_xavi, loc3) 
+#A2 <- inla.spde.make.A(mesh_xavi, loc1) 
+
+A <- inla.spde.make.A(mesh_xavi, loc1) 
+
+
+# stack3 <- inla.stack(
+#   data = list(y = cbind(NA, NA,as.vector(y3)), link=3),
+#   A = list(A3,1), 
+#   effects = list(list(s3 = 1:spde_corre$n.spde,
+#                        s13 = 1:spde_corre$n.spde,
+#                         s23 = 1:spde_corre$n.spde),
+#                    #    list( plate=1:nrow(data2010)),
+#                   data.frame(intercept3 = 1, batimetria3=batimetria3)),
+#   tag="est.sarina.corre")
+
+stack2 <- inla.stack(
+  data = list(y = cbind(NA, as.vector(y2)), link=2),
+  A = list(A,1), 
+  effects = list(list(s2 = 1:spde_corre$n.spde,
+                      s12 = 1:spde_corre$n.spde),
+                  data.frame(intercept2 = 1, batimetria2=batimetria2)),
+  tag="est.anxova.corre")
+
+stack1 <- inla.stack(
+  data = list(y = cbind(as.vector(y1), NA), link=1),
+  A = list(A,1), 
+  effects = list(list(s1 = 1:spde_corre$n.spde),
+                  data.frame(intercept1 = 1, batimetria1=batimetria1)),
+  tag="est.hake.corre")
+
+
+stack <- inla.stack(stack1, stack2) 
+
+#----result, results = 'hide'--------------------------------------------
+
+# result_corre2010<- inla(form, c(rep('gamma', 3)),
+#   data = inla.stack.data(stack),
+# #  control.family = list(hyper.eps, hyper.eps),
+#   control.predictor = list(A = inla.stack.A(stack)),
+#  # control.mode = list(theta = theta.ini, restart = TRUE),
+#   control.inla = list(int.strategy = 'eb'))
+
+result_corre2000_sardine<- inla(form, c(rep('gamma', 2)),
+                       data = inla.stack.data(stack),
+                        control.family = list(list(link = "log"),
+                                             list(link = "log")),
+                       #  control.family = list(hyper.eps, hyper.eps),
+                       # control.family=list(list(link="logit"),list(link="logit")),
+                       control.predictor = list(A = inla.stack.A(stack),
+                                                compute = TRUE,link=1),
+                   #    control.mode = list(theta =result_corre2010$mode$theta, restart = TRUE),
+                      control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE,    config = TRUE),
+                       #   control.inla = list( int.strategy = 'eb') ,
+                       control.results = list(return.marginals.predictor = FALSE,
+                                              return.marginals.random = FALSE),
+                      control.inla = list(int.strategy = 'eb'),
+                       num.threads = 3,
+                       verbose=FALSE)
+#result_corre2000<-inla.rerun(result_corre2000)
+
+# beep(0)
+# beep("fanfare")
+# beep(8)
+
+saveRDS(result_corre2000_sardine, file="result_corre2000_sardine.RDS")
+result_corre2000_sardine<-readRDS(file="result_corre2000_sardine.RDS")
+
+#summary(result_corre2000)
+
+knitr::kable(result_corre2000_sardine$summary.fixed[,1:5],
+  row.names = TRUE,
+  caption = "Posterior distribution for Fixed Effects (Sardines: Coregionalization 2000-2017).",
+   format = "pandoc")
+
+knitr::kable(result_corre2000_sardine$summary.hyperpar[,1:5], digits=3,
+  row.names = TRUE,
+  caption = "Posterior distributions of the parameters of the spatial fields (Sardines: Coregionalization 2000-2017).",
+   format = "pandoc")
+```
+
+
+```{r spatial_effect_corre-sardines}
+####################################################
+### --- Interpolate the posterior mean and sd --- ##
+####################################################
+### --- plot in a grid m X m --- ##
+
+### --- Customize the grid to predict --- ###
+#now we are going to remove the part of the mesh that was inside the coast
+layout(1,1)
+#bbox(coast)
+dxy <- apply(bbox(coast),1, diff)
+r <- dxy[1]/dxy[2]
+m<-150
+proj.grid.mat <- 
+  inla.mesh.projector(mesh_xavi, 
+                      xlim=bbox(coast)[1,],
+                      ylim=bbox(coast)[2,] ,
+                      dims=c(r, 1)*m)
+
+
+### --- clean (set NA to the values outside boundary) --- ###
+ov <- over(SpatialPoints(proj.grid.mat$lattice$loc, coast@proj4string),
+           coast)
+
+### --- check grid points inside the map --- ###
+i.map <- is.na(ov)
+
+
+```
+
+
+
+## Prediction
+
+
+```{r corre-pred-sardines}
+A1.pred <- inla.spde.make.A(mesh_xavi, loc=proj.grid.mat$lattice$loc[!i.map, ])
+A2.pred <- inla.spde.make.A(mesh_xavi, loc=proj.grid.mat$lattice$loc[!i.map, ])
+#A3.pred <- inla.spde.make.A(mesh_xavi, loc=proj.grid.mat$lattice$loc[!i.map, ])
+
+
+bathy.pred<-raster::extract(predictors2$Bathymetry,  proj.grid.mat$lattice$loc[!i.map, ]) 
+
+bathy.pred<-scale(bathy.pred, scale=FALSE)
+
+
+nY<-table(!i.map)[2]
+
+stk.pred.1 <- inla.stack(data=list(y=matrix(NA, ncol=2, nrow=nY), link=1), 
+                         A=list(A1.pred,1), 
+                         effects = list(list(s1 = 1:spde_corre$n.spde),
+                                        data.frame(intercept1=rep(1,nY), batimetria2=bathy.pred)),
+                         tag='pred.y1.corre')
+
+stk.pred.2 <- inla.stack(data=list(y=matrix(NA, ncol=2, nrow=nY), link=2), 
+                         #  ,, 
+                         A=list(A2.pred,1), 
+                         effects = list(list(s2 = 1:spde_corre$n.spde,
+                                             s12 = 1:spde_corre$n.spde),
+                                        data.frame(intercept2=rep(1,nY), batimetria2=bathy.pred)),
+                         tag='pred.y2.corre')
+
+# stk.pred.3 <- inla.stack(data=list(y=matrix(NA, ncol=3, nrow=nY), link=3), 
+#                          #  ,, 
+#                          A=list(A2.pred,1), 
+#                          effects = list(list(s3 = 1:spde_corre$n.spde,
+#                                              s13 = 1:spde_corre$n.spde,
+#                                              s23 = 1:spde_corre$n.spde),
+#                                         data.frame(intercept3=rep(1,nY), batimetria3=bathy.pred)),
+#                          tag='pred.y3')
+
+
+stack_all <- inla.stack(stack1, stack2,# stack3,  
+                        stk.pred.1, stk.pred.2)#, stk.pred.3) 
+
+pred_corre_2012_2017_sardine<- inla(form, c(rep('gamma', 2)),
+                       data = inla.stack.data(stack_all),
+                        control.family = list(list(link = "log"),
+                                             list(link = "log")),
+                       #  control.family = list(hyper.eps, hyper.eps),
+                       # control.family=list(list(link="logit"),list(link="logit")),
+                       control.predictor = list(A = inla.stack.A(stack_all),
+                                                compute = TRUE,link=1),
+                       control.mode = list(theta =result_corre2000_sardine$mode$theta, 
+                                                 restart = TRUE),
+                    #   control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE,    config = TRUE),
+                       #   control.inla = list( int.strategy = 'eb') ,
+                       control.results = list(return.marginals.predictor = FALSE,
+                                              return.marginals.random = FALSE),
+                      control.inla = list(int.strategy = 'eb'),
+                       num.threads = 3,
+                       verbose=FALSE)
+# beep(0)
+# beep("fanfare")
+# beep(8)
+
+saveRDS(pred_corre_2012_2017_sardine, file="pred_corre_2012_2017_sardine.RDS")
+pred_corre_2012_2017<-readRDS(file="pred_corre_2012_2017_sardine.RDS")
+
+```
+
+
+### spatial effect
+
+```{r}
+
+idx.y2 <- inla.stack.index(stack_all, 'pred.y2.corre')$data  
+
+
+
+spatial.effect.corre_sardine  <- matrix(NA, proj.grid.mat$lattice$dims[1],proj.grid.mat$lattice$dims[2])
+spatial.effect.corre_sardine[!i.map]<-pred_corre_2012_2017_sardine$summary.linear.predictor[idx.y2 , "mean"]
+
+## plot spatial effect
+image.plot(proj.grid.mat$x, 
+           proj.grid.mat$y,
+          ( spatial.effect.corre), 
+           axes=TRUE, xlab=("Longitude"), ylab="Latitude"  ,
+           col= tim.colors(100), horizontal = T) #, zlim=c(-15,15))#,
+          # breaks = breaks)
+plot(europe, add=TRUE,col="bisque4")
+title(" mean spatial effect Sardines (coregionalized)")
+box()
+
+kk.sardina<- spatial.effect_sardine-mean( spatial.effect_sardine, na.rm=TRUE)
+kk.sardina.corre<-spatial.effect.corre-mean(spatial.effect.corre, na.rm=TRUE)
+
+hist(kk.sardina-kk.sardina.corre, 
+     main="Diferencia del efecto espacial centrado en media")
+
+```
+
+
+
+### Searching Spatial effect differences
+
+```{r}
+
+idx.y2 <- inla.stack.index(stack_all, 'pred.y2.corre')$data  
+
+
+
+diff.spatial.effect_sardine  <- matrix(NA, proj.grid.mat$lattice$dims[1],proj.grid.mat$lattice$dims[2])
+diff.spatial.effect_sardine <-spatial.effect.corre_sardine-spatial.effect_sardine
+
+## plot spatial effect
+image.plot(proj.grid.mat$x, 
+           proj.grid.mat$y,
+          ( diff.spatial.effect_sardine), 
+           axes=TRUE, xlab=("Longitude"), ylab="Latitude"  ,
+           col= tim.colors(100), horizontal = T) #, zlim=c(-15,15))#,
+          # breaks = breaks)
+plot(europe, add=TRUE,col="bisque4")
+title(" mean spatial effect differences Sardines (coreg-uni)")
+box()
+
+```
+
+
+
+# Spatio-temporal Sardines |Hake
+
+$$y_1(s,t)=\beta_0^1+ \beta_1^1 \times Bathy + z_1(s,t)+ e_1(s,t)$$
+$$y_2(s,t)= \beta_0^2+ \beta_1^2 \times Bathy + \alpha_{2|1} y_1(s,t) + z_2(s,t)+ e_2(s,t)$$
+
+## From 1995 since 2017 
+
+```{r inference-st-1-sardines, eval=TRUE}
+# spde_st1 <- inla.spde2.pcmatern(mesh = mesh_xavi, 
+#   prior.range = c(0.05, 0.01), # P(range < 0.05) = 0.01
+#   prior.sigma = c(1, 0.01)) # P(sigma > 1) = 0.01
+
+# sele<-data3$year==1995 |  data3$year==2000 | data3$year==2005 |  data3$year==20010 |  data3$year==2015 
+# sele<-data3$year==1999 |  data3$year==2000 | data3$year==2010 |  data3$year==20015 |   data3$year==2016 |  data3$year==2017
+# 
+# 
+# sele<-data3$year==1995 |  data3$year==2000 | data3$year==2005 |  data3$year==20010 |   data3$year==2015 |  data3$year==2017
+
+sele<-(data3$abun.hake>0 & data3$abun.hake<9999) &  (data3$abun.sardina >0  & data3$abun.sardina<11200)
+
+
+y1<-data3$hake[sele ]
+y2<-data3$sardina[sele ]
+
+y1<-data3$abun.hake[sele ]+0.001
+y2<-data3$abun.sardina[sele ]+0.001
+
+range2006= result_corre2000_sardine$summary.hyperpar[3,3]
+stdev2006=result_corre2000_sardine$summary.hyperpar[4,5]
+
+spde_st1  <- inla.spde2.pcmatern(mesh = mesh_xavi, 
+                                  prior.range = c(range2006, 0.025), # P(range < range0) = 0.025
+                                  prior.sigma = c(stdev2006, 0.025),
+                                 constr = T) # P(sigma > sigma0) = 0.025
+
+
+
+# Indices for the space-time fields and for the copies need to be defined as well. As the same mesh is considered in all effects, these indices are the same for all the effects:
+
+#years
+k<-length(unique(data3$year[sele ]))
+
+s1 <- rep(1:spde_st1$n.spde, times = k)
+s2 <- s1
+s12 <- s1
+#s13 <- s1
+#s23 <- s1
+
+
+g1 <-   rep(1:k, each = spde_st1$n.spde)
+g2 <- g1
+g3<-g1
+g12 <- g1
+#g13 <- g1
+#g23<- g1
+
+# The prior on  rho_j   is chosen as a Penalized Complexity prior (Simpson et al. 2017) as well:
+
+rho1p <- list(theta = list(prior = 'pccor1', param = c(0.3, 0.9))) 
+ctr.g <- list(model = 'ar1', hyper = rho1p)
+
+# The prior above is chosen to consider  P(rho_j>0)=0.9
+#Priors for each of the copy parameters are Gaussian with zero mean and precision 10:
+
+hc1 <- list(theta = list(prior = 'normal', param = c(0, 10)))
+
+# The formula, which includes all the terms in the model and the priors previously defined, is:
+
+form <- y ~ -1 + intercept1 + intercept2 + # intercept3+ 
+  + batimetria1+ batimetria2+ #batimetria3+
+  f(s1, model = spde_st1, group = g1, control.group = ctr.g) + 
+  f(s2, model = spde_st1, group = g2, control.group = ctr.g) + 
+  f(s12, copy = "s1", group = g12, fixed = FALSE, hyper = hc1) #+
+
+
+X<-data3$lon[sele ]
+Y<-data3$lat[sele ]
+#loc3<-cbind(X,Y)
+loc2<-cbind(X,Y)
+loc1<-cbind(X,Y)
+
+
+ x1<-x2<-x3<-scale(data3$Bathymetry, scale=F)
+ x1<-x2<-scale(data3$Bathymetry[sele ], scale=F)
+# # 
+ loc<-as.matrix(cbind(data3[sele,2:3]))## different sampling points, and this is a problem!!
+ 
+
+# #  #create groups i groups.n 
+index<-as.vector(table(data3$year[sele]))
+
+ groups.years<-matrix(NA, ncol=1)
+ group.n.years<-matrix(NA, ncol=1)
+jj<-0
+for (i in 1:k){
+  jj<-jj+1
+  kk<-matrix(rep(i,  index[i]), ncol=1)
+  groups.years<-rbind(groups.years,kk)
+  group.n.years<-rbind(group.n.years, matrix( 1:index[i],ncol=1))
+}
+groups.years<-as.vector(groups.years[-1,])
+group.n.years<-as.vector(group.n.years[-1,])
+
+#stloc<-kronecker(matrix(1,k,1), loc)
+
+## create a A matrix with groups  x year.
+A <- inla.spde.make.A(mesh_xavi, loc,
+                      n.group = k,
+                      group =groups.years)
+# 
+# # 
+# # # INDEX juve/adult
+mesh.index.hake<- inla.spde.make.index("i.hake",
+                                      n.spde=spde_st1$n.spde,
+                                      n.group=k)
+
+
+
+mesh.index.anxova<- inla.spde.make.index("i.anxova",
+                                      n.spde=spde_st1$n.spde,
+                                      n.group=k)
+
+
+#Then data are organized in three data stacks, which are joined:
+
+####### include Bathy
+
+stack1 <- inla.stack(
+  data = list(y = cbind(y1, NA)),
+  A = list(A,1), 
+  effects = list(list(s1 = s1, g1 = g1),list(data.frame(intercept1= 1,batimetria1=x1))),
+  tag='est.st.y1') 
+
+
+stack2 <- inla.stack(
+  data = list(y = cbind(NA, y2)),
+  A = list(A,1), 
+  effects = list(list( s2 = s2, g2 = g2, 
+    s12 = s12, g12 = g12),list(data.frame(intercept2 = 1, batimetria2=x2))), tag='est.st.y2') 
+
+
+stack <- inla.stack(stack1, stack2)#, stack3) 
+
+#estimate_corre_st_1<-readRDS( "estimate_corre_st_1.RDS")
+
+#moda = list(theta =estimate_corre_st_1$mode$theta, restart = TRUE)
+
+estimate_corre_st_1_sardines <- inla(form, rep('lognormal', 2),
+                            data = inla.stack.data(stack),
+                     #  control.mode = moda,
+                      control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE,    config = TRUE),
+                       control.results = list(return.marginals.predictor = FALSE,
+                                              return.marginals.random = FALSE),
+                    # control.mode = list(theta = theta.ini, restart = TRUE),
+                     control.inla = list(int.strategy = 'eb'),
+                 control.predictor = list(A = inla.stack.A(stack),
+                                          compute = TRUE,link=1),
+                    num.threads =4)
+
+saveRDS(estimate_corre_st_1_sardines, file="estimate_corre_st_1_sardines.RDS")
+estimate_corre_st_1_sardines<-readRDS( "estimate_corre_st_1_sardines.RDS")
+
+
+#summary(estimate_corre_st_1)
+
+
+knitr::kable(estimate_corre_st_1_sardines$summary.fixed[,1:5],
+  row.names = TRUE,
+  caption = "Posterior distribution for Fixed Effects (spatio-temporal Sardines Coregionalization 2000-2017).",
+   format = "pandoc")
+
+knitr::kable(estimate_corre_st_1_sardines$summary.hyperpar[,1:5], digits=3,
+  row.names = TRUE,
+  caption = "Posterior distributions of the parameters of the spatio-temporal fields (spatio-temporal Sardines Coregionalization 2000-2017).",
+   format = "pandoc")
+
+
+```
